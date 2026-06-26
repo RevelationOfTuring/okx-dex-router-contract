@@ -1,0 +1,15 @@
+forge-std/=lib/forge-std/src/
+contracts/8/=src/8/
+@ensdomains/=node_modules/@ensdomains/
+@openzeppelin/=node_modules/@openzeppelin/
+ds-test/=lib/forge-std/lib/ds-test/src/
+eth-gas-reporter/=node_modules/eth-gas-reporter/
+hardhat/=node_modules/hardhat/
+@dex/=src/8/
+@dex-exactout/=src/exactout/
+@uniswap/=node_modules/@uniswap/
+@zetachain/=node_modules/@zetachain/
+forge-gas-snapshot/=lib/permit2/lib/forge-gas-snapshot/src/
+openzeppelin-contracts/=lib/permit2/lib/openzeppelin-contracts/
+permit2/=lib/permit2/
+solmate/=lib/permit2/lib/solmate/
