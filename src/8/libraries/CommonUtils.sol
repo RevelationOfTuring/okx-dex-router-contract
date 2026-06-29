@@ -9,7 +9,6 @@ import "../interfaces/IDexRouter.sol";
  *      继承路径：CommonUtils → CommonLib → UnxswapRouter / UnxswapV3Router → DexRouter
  */
 abstract contract CommonUtils is IDexRouter {
-
     //=============================================================
     //                     ETH 占位符地址
     //=============================================================
@@ -29,12 +28,39 @@ abstract contract CommonUtils is IDexRouter {
      * 本合约大量使用 uint256 作为"打包数据"的容器，通过位运算把多个字段塞进同一个 256 位的槽里，
      * 以减少 calldata 长度和存储开销。下面的掩码用于提取各字段。
      *
-     * 位图全景（不同上下文有不同的位约定）:
+     * 位图全景（不同上下文有不同的位约定，下方标注每个字段的 [起始位:结束位]=占用位数）:
      *
-     *   bit:  255   254   253   ... 251 250 249 ... 199-192  191-184  175-160   159-0
-     *         ▲     ▲     ▲        ▲   ▲   ▲       ▲        ▲        ▲         ▲
-     *        rev  WETH  unwrap    ─── mode ───    outIdx   inIdx   weight    address
-     *        /oneForZero          (传输模式标志)    (DAG)    (DAG)   (万分比)   (160位)
+     *   高位 ──────────────────────────────────────────────────────────────► 低位
+     *
+     *    字段     占用 bit 区间      位宽     掩码常量
+     *    ───────────────────────────────────────────────────────────────────
+     *    rev/o4z  255                1 位    _REVERSE_MASK / _ONE_FOR_ZERO_MASK
+     *    WETH     254                1 位    _WETH_MASK
+     *    unwrap   253                1 位    _WETH_UNWRAP_MASK
+     *    (保留)   252                1 位    —
+     *    mode     251:249            3 位    _TRANSFER_MODE_MASK
+     *    (保留)   248:192           57 位    —
+     *    inIdx    191:184            8 位    _INPUT_INDEX_MASK
+     *    outIdx   183:176            8 位    _OUTPUT_INDEX_MASK
+     *    weight   175:160           16 位    _WEIGHT_MASK
+     *    address  159:0            160 位    _ADDRESS_MASK
+     *    ───────────────────────────────────────────────────────────────────
+     *    合计 1+1+1+1+3+57+8+8+16+160 = 256 位
+     *
+     *  字段明细:
+     *    rev/o4z   bit 255         (1 位)    方向标志 _REVERSE_MASK / _ONE_FOR_ZERO_MASK（同一 bit，不同语义）
+     *    WETH      bit 254         (1 位)    _WETH_MASK，标记 pool 涉及 WETH
+     *    unwrap    bit 253         (1 位)    _WETH_UNWRAP_MASK，swap 后是否把 WETH 解包成 ETH
+     *    （保留）  bit 252         (1 位)    未使用
+     *    mode      bit 251:249     (3 位)    转账模式 _TRANSFER_MODE_MASK（noTransfer / byInvest / permit2）
+     *    （保留）  bit 248:192     (57 位)   未使用
+     *    inIdx     bit 191:184     (8 位)    _INPUT_INDEX_MASK，DAG 路由输入节点索引
+     *    outIdx    bit 183:176     (8 位)    _OUTPUT_INDEX_MASK，DAG 路由输出节点索引
+     *    weight    bit 175:160     (16 位)   _WEIGHT_MASK，fork 分流权重（万分比 0~10000）
+     *    address   bit 159:0       (160 位)  _ADDRESS_MASK，打包的合约/池子地址
+     *
+     *  注：bit 255:160（高 96 位）整体又可被复用为 _ORDER_ID_MASK 携带 orderId（见下方常量），
+     *      与上面按字段拆分的用法是「不同上下文、不同约定」，不会同时生效。
      */
 
     /**
@@ -58,7 +84,7 @@ abstract contract CommonUtils is IDexRouter {
         0x8000000000000000000000000000000000000000000000000000000000000000;
 
     /**
-     * @notice 订单号掩码：bit 160~255（高 96 位，12 字节）
+     * @notice 订单号掩码：bit 255~160（高 96 位，12 字节）
      * @dev 在 unxswapTo / uniswapV3SwapTo 中，srcToken/receiver 参数的高 96 位
      *      被复用来携带 orderId，这样不增加 calldata 长度就能传递订单号
      *      提取方式：orderId = (srcToken & _ORDER_ID_MASK) >> 160
@@ -68,7 +94,7 @@ abstract contract CommonUtils is IDexRouter {
         0xffffffffffffffffffffffff0000000000000000000000000000000000000000;
 
     /**
-     * @notice 权重掩码：bit 160~175（16 位）
+     * @notice 权重掩码：bit 175~160（16 位）
      * @dev 表示一个 fork 在当前 hop 内的分流比例，单位是"万分比"
      *      范围 0~10000，10000 表示这个 fork 接收该 hop 的 100% 资金
      *      提取方式：weight = (rawData & _WEIGHT_MASK) >> 160
@@ -139,7 +165,7 @@ abstract contract CommonUtils is IDexRouter {
     //                  转账模式常量 (Transfer Modes)
     //=============================================================
     /*
-     * 编码在 fromToken 字段的高位 (bit 249~251)，
+     * 编码在 fromToken 字段的高位 (bit 251~249)，
      * 告诉 _transferInternal 函数"钱从哪里来、怎么转"
      */
 
@@ -175,17 +201,18 @@ abstract contract CommonUtils is IDexRouter {
      *      当前实现中遇到此模式直接 return，不做任何操作
      */
     uint256 internal constant _MODE_PERMIT2 = 1 << 249;
-    
+
     /**
-     * @notice 转账模式掩码：覆盖 bit 249~251 这三位
-     * @dev 0x0E = 二进制 0000_1110，左移后正好覆盖 bit 249, 250, 251
+     * @notice 转账模式掩码：覆盖 bit 251~249 这三位
+     * @dev 0x0E = 二进制 0000_1110，左移后正好覆盖 bit 251, 250, 249
      *      用法：mode = fromToken & _TRANSFER_MODE_MASK
      *      提取后直接与 _MODE_xxx 常量比对（不需要右移）
      */
-    uint256 internal constant _TRANSFER_MODE_MASK = 0x0E00000000000000000000000000000000000000000000000000000000000000;
+    uint256 internal constant _TRANSFER_MODE_MASK =
+        0x0E00000000000000000000000000000000000000000000000000000000000000;
 
     /**
-     * @notice DAG 路由输入节点索引掩码：bit 184~191（8 位）
+     * @notice DAG 路由输入节点索引掩码：bit 191~184（8 位）
      * @dev 在 DagRouter 中使用，指定当前节点的输入来自 DAG 中哪个节点的输出
      *      8 位 = 最多 256 个节点，对单笔交易的路由拓扑而言远远足够
      */
@@ -193,7 +220,7 @@ abstract contract CommonUtils is IDexRouter {
         0x0000000000000000ff0000000000000000000000000000000000000000000000;
 
     /**
-     * @notice DAG 路由输出节点索引掩码：bit 176~183（8 位）
+     * @notice DAG 路由输出节点索引掩码：bit 183~176（8 位）
      * @dev 在 DagRouter 中使用，指定当前节点的输出将被 DAG 中哪个节点消费
      *      与 _INPUT_INDEX_MASK 配合，构成 DAG 路由的拓扑连接关系
      */
@@ -258,21 +285,31 @@ abstract contract CommonUtils is IDexRouter {
     // CRO:     E9BBD6eC0c9Ca71d3DcCD1282EE9de4F811E50aF
     // CFX:     100F3f74125C8c724C7C0eE81E4dd5626830dD9a
     // POLYZK   1b5d39419C268b76Db06DE49e38B010fbFB5e226
-    address public constant _APPROVE_PROXY = 0xd99cAE3FAC551f6b6Ba7B9f19bDD316951eeEE98;
+    address public constant _APPROVE_PROXY =
+        0xd99cAE3FAC551f6b6Ba7B9f19bDD316951eeEE98;
     // address public constant _APPROVE_PROXY = 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512;    // hardhat1
     // address public constant _APPROVE_PROXY = 0x2538a10b7fFb1B78c890c870FC152b10be121f04;    // hardhat2
 
     /**
-     * @notice WNativeRelayer 合约地址 —— WETH→ETH 解包的无状态中介
-     * @dev 设计意图：
-     *      WETH.withdraw() 会把 ETH 发给 msg.sender（即 caller）。
-     *      如果 Router 直接调 withdraw，ETH 会留在 Router 里，产生以下问题：
-     *        - Router 持有 ETH 余额成为攻击面（有人可能故意打 ETH 污染状态）
-     *        - Router 需要额外逻辑管理 ETH 余额
-     *      解决方案：引入无状态的 Relayer 做中介：
-     *        Router → transfer WETH to Relayer → Relayer.withdraw() → Relayer 收到 ETH
-     *        → Relayer 把 ETH 转给最终 receiver
-     *      Relayer 是极简合约，每次操作完余额为 0，可被视为"一次性管道"
+     * @notice WNativeRelayer 合约地址 —— 专门负责「WETH → ETH 解包」的无状态中介合约
+     * @dev 【它解决什么问题】
+     *      Router 内部统一用 WETH 处理兑换，最后给用户原生 ETH 时需要解包(WETH.withdraw)。
+     *      但 WETH.withdraw(amount) 会把解出的 ETH 发给【msg.sender（谁调用就发给谁）】。
+     *      若 Router 自己直接调 withdraw，ETH 就会落在 Router 里，带来两个问题：
+     *        1. 安全：Router 逻辑复杂、被广泛调用，持有 ETH 余额会扩大攻击面；
+     *           且任何人可故意往 Router 直接打 ETH「投毒」，干扰依赖 address(this).balance 的余额计算；
+     *        2. 复杂度：Router 需额外逻辑管理这笔 ETH 余额。
+     *
+     *      【Relayer 如何解决】把"持有 ETH"这个危险状态转移到一个极简合约里。
+     *      因为 withdraw 发给 msg.sender，就让 Relayer 去当这个 msg.sender：
+     *        Router 把 WETH transfer 给 Relayer
+     *          → Router 调 Relayer.withdraw()
+     *          → Relayer 调 WETH.withdraw()，ETH 落到 Relayer（而非 Router）
+     *          → Relayer 立刻把 ETH 转给最终 receiver，自身余额归 0
+     *      （本仓库对应实现见 CommonLib._transferTokenToUser 的 ETH 分支）
+     *
+     *      【为什么 Relayer 安全】它代码极简（只做"解包 + 转发"）、无状态、每次操作完余额为 0，
+     *      可视为"一次性管道"——钱流过即走、不沉淀，几乎没有攻击面；从而让复杂的 Router 始终不碰 ETH。
      */
     // ETH:     5703B683c7F928b721CA95Da988d73a3299d4757
     // BSC:     0B5f474ad0e3f7ef629BD10dbf9e4a8Fd60d9A48
@@ -287,7 +324,8 @@ abstract contract CommonUtils is IDexRouter {
     // CRO:     40aA958dd87FC8305b97f2BA922CDdCa374bcD7f
     // CFX:     40aA958dd87FC8305b97f2BA922CDdCa374bcD7f
     // POLYZK   d2F0aC2012C8433F235c8e5e97F2368197DD06C7
-    address public constant _WNATIVE_RELAY = 0x0B5f474ad0e3f7ef629BD10dbf9e4a8Fd60d9A48;
+    address public constant _WNATIVE_RELAY =
+        0x0B5f474ad0e3f7ef629BD10dbf9e4a8Fd60d9A48;
     // address public constant _WNATIVE_RELAY = 0x0B306BF915C4d645ff596e518fAf3F9669b97016;   // hardhat1
     // address public constant _WNATIVE_RELAY = 0x6A47346e722937B60Df7a1149168c0E76DD6520f;   // hardhat2
 }
